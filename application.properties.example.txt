@@ -1,0 +1,2 @@
+server.port=8081
+groq.api.key=your-groq-api-key-here
