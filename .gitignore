@@ -38,3 +38,5 @@ src/main/resources/application.properties
 # Temp cloned repos
 repos/
 repos/*
+
+.metadata/
