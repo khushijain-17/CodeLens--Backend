@@ -25,7 +25,7 @@ public class AIService {
 
         // Build request body
         Map<String, Object> request = new HashMap<>();
-        request.put("model", "llama-3.1-8b-instant");
+        request.put("model", "llama-3.3-70b-versatile");
         request.put("max_tokens", 1024);
 
         List<Map<String, String>> messages = new ArrayList<>();
