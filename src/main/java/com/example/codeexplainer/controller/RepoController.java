@@ -128,6 +128,7 @@ public class RepoController {
     @GetMapping(value = "/graph", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> getDependencyGraph(@RequestParam String repoPath) {
         try {
+        	System.out.println("GRAPH repoPath = " + repoPath);
             Map<String, Object> graph = new HashMap<>();
             List<Map<String, Object>> nodes = new ArrayList<>();
             List<Map<String, Object>> edges = new ArrayList<>();
