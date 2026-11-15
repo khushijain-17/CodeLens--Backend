@@ -2,6 +2,7 @@ package com.example.codeexplainer.controller;
 
 import com.example.codeexplainer.model.SavedRepo;
 import com.example.codeexplainer.repository.SavedRepoRepository;
+import com.example.codeexplainer.service.GitService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -11,11 +12,13 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/saved")
-@CrossOrigin(origins = "*")
 public class SavedRepoController {
 
     @Autowired
     private SavedRepoRepository savedRepoRepository;
+
+    @Autowired
+    private GitService gitService;
 
     @GetMapping
     public List<SavedRepo> getAll() {
@@ -28,11 +31,19 @@ public class SavedRepoController {
         if (url == null || url.isBlank()) {
             return ResponseEntity.badRequest().body("No URL provided");
         }
-        if (savedRepoRepository.existsByUrl(url)) {
+
+        String normalized;
+        try {
+            normalized = gitService.normalizeGithubUrl(url);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
+        }
+
+        if (savedRepoRepository.existsByUrl(normalized)) {
             return ResponseEntity.ok("Already saved");
         }
-        String name = url.replace("https://github.com/", "").replace(".git", "");
-        SavedRepo saved = new SavedRepo(url, name);
+        String name = normalized.replace("https://github.com/", "").replace(".git", "");
+        SavedRepo saved = new SavedRepo(normalized, name);
         return ResponseEntity.ok(savedRepoRepository.save(saved));
     }
 
