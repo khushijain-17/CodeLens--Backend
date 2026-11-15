@@ -1,23 +1,23 @@
 package com.example.codeexplainer.controller;
 
+import com.example.codeexplainer.model.SavedRepo;
+import com.example.codeexplainer.repository.SavedRepoRepository;
 import com.example.codeexplainer.service.AIService;
-import org.eclipse.jgit.api.Git;
+import com.example.codeexplainer.service.GitService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import com.example.codeexplainer.repository.SavedRepoRepository;
-import com.example.codeexplainer.model.SavedRepo;
 
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.nio.file.NoSuchFileException;
 import java.util.*;
 
 @RestController
 @RequestMapping("/api/repo")
-@CrossOrigin(origins = "*")
 public class RepoController {
 
     @Autowired
@@ -25,6 +25,9 @@ public class RepoController {
 
     @Autowired
     private SavedRepoRepository savedRepoRepository;
+
+    @Autowired
+    private GitService gitService;
 
     // ─────────────────────────────────────────
     // 1. ANALYZE
@@ -37,34 +40,24 @@ public class RepoController {
             return ResponseEntity.badRequest().body("No URL provided");
         }
 
-        if (!repoUrl.endsWith(".git")) {
-            repoUrl = repoUrl + ".git";
-        }
-
         try {
-            Path tempDir = Files.createTempDirectory("repo-");
-            System.out.println("Cloning repo: " + repoUrl);
-            System.out.println("Into directory: " + tempDir.toAbsolutePath());
+            // Only https://github.com/<owner>/<repo> is accepted
+            String cloneUrl = gitService.normalizeGithubUrl(repoUrl);
+            // Shallow clone into the app's own repos/ folder
+            File dir = gitService.cloneRepo(cloneUrl);
 
-            Git.cloneRepository()
-               .setURI(repoUrl)
-               .setDirectory(tempDir.toFile())
-               .call();
-
-            System.out.println("Clone successful!");
-
-            String repoName = repoUrl.substring(repoUrl.lastIndexOf("/") + 1).replace(".git", "");
-            if (!savedRepoRepository.existsByUrl(repoUrl)) {
-                savedRepoRepository.save(new SavedRepo(repoUrl, repoName));
+            String repoName = cloneUrl.substring(cloneUrl.lastIndexOf("/") + 1).replace(".git", "");
+            if (!savedRepoRepository.existsByUrl(cloneUrl)) {
+                savedRepoRepository.save(new SavedRepo(cloneUrl, repoName));
             }
 
-            List<Map<String, Object>> tree = buildTree(tempDir.toFile());
-            return ResponseEntity.ok(tree);
+            return ResponseEntity.ok(buildTree(dir));
 
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.internalServerError()
-                    .body("Failed to clone repo: " + e.getMessage());
+            return ResponseEntity.internalServerError().body("Failed to clone repo");
         }
     }
 
@@ -74,29 +67,15 @@ public class RepoController {
     @GetMapping(value = "/file", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> getFile(@RequestParam String path) {
         try {
-            Path filePath = Paths.get(path);
-            System.out.println("Requested file path: " + filePath.toAbsolutePath());
-
-            if (!Files.exists(filePath)) {
-                return ResponseEntity.badRequest()
-                        .body("File not found: " + filePath.toAbsolutePath());
-            }
-            if (Files.isDirectory(filePath)) {
-                return ResponseEntity.badRequest()
-                        .body("Path is a directory, not a file: " + filePath.toAbsolutePath());
-            }
-
-            String fileName = filePath.getFileName().toString();
-            if (isBinaryFile(fileName)) {
-                return ResponseEntity.ok("[Binary file — cannot display]");
-            }
-
-            String content = Files.readString(filePath);
-            return ResponseEntity.ok(content);
-
+            return ResponseEntity.ok(gitService.readFile(path));
+        } catch (AccessDeniedException e) {
+            return ResponseEntity.status(403).body("Access denied");
+        } catch (NoSuchFileException e) {
+            return ResponseEntity.status(404).body("File not found");
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
         } catch (IOException e) {
-            return ResponseEntity.internalServerError()
-                    .body("Error reading file: " + e.getMessage());
+            return ResponseEntity.internalServerError().body("Error reading file");
         }
     }
 
@@ -128,23 +107,20 @@ public class RepoController {
     @GetMapping(value = "/graph", produces = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<?> getDependencyGraph(@RequestParam String repoPath) {
         try {
-        	System.out.println("GRAPH repoPath = " + repoPath);
             Map<String, Object> graph = new HashMap<>();
             List<Map<String, Object>> nodes = new ArrayList<>();
             List<Map<String, Object>> edges = new ArrayList<>();
 
-            java.io.File dir = new java.io.File(repoPath);
-            if (!dir.exists()) {
-                return ResponseEntity.badRequest().body("Repo path not found");
-            }
+            // Throws AccessDeniedException if repoPath is outside the repos folder
+            File dir = gitService.resolveInsideRepos(repoPath).toFile();
 
             // Collect all code files
-            List<java.io.File> files = new ArrayList<>();
+            List<File> files = new ArrayList<>();
             collectFiles(dir, files);
 
             // Build nodes
             Map<String, String> fileIdMap = new HashMap<>();
-            for (java.io.File file : files) {
+            for (File file : files) {
                 String id = file.getName().replaceAll("[^a-zA-Z0-9]", "_");
                 fileIdMap.put(file.getName(), id);
 
@@ -158,12 +134,12 @@ public class RepoController {
             }
 
             // Build edges by scanning imports
-            for (java.io.File file : files) {
+            for (File file : files) {
                 try {
                     String content = Files.readString(file.toPath());
                     String sourceId = fileIdMap.get(file.getName());
 
-                    for (java.io.File otherFile : files) {
+                    for (File otherFile : files) {
                         if (otherFile.equals(file)) continue;
                         String otherName = otherFile.getName()
                             .replaceAll("\\.(java|js|jsx|ts|tsx|py)$", "");
@@ -178,25 +154,28 @@ public class RepoController {
                 } catch (Exception ignored) {}
             }
 
-            // ✅ Fixed: these lines were missing before
             graph.put("nodes", nodes);
             graph.put("edges", edges);
             graph.put("repoPath", repoPath);
             return ResponseEntity.ok(graph);
 
+        } catch (AccessDeniedException e) {
+            return ResponseEntity.status(403).body("Access denied");
+        } catch (NoSuchFileException e) {
+            return ResponseEntity.badRequest().body("Repo path not found");
         } catch (Exception e) {
             e.printStackTrace();
             return ResponseEntity.internalServerError()
-                    .body("Failed to build graph: " + e.getMessage());
+                    .body("Failed to build graph");
         }
     }
 
     // ─────────────────────────────────────────
     // HELPERS
     // ─────────────────────────────────────────
-    private List<Map<String, Object>> buildTree(java.io.File dir) {
+    private List<Map<String, Object>> buildTree(File dir) {
         List<Map<String, Object>> nodes = new ArrayList<>();
-        java.io.File[] files = dir.listFiles();
+        File[] files = dir.listFiles();
 
         if (files == null) return nodes;
 
@@ -206,8 +185,9 @@ public class RepoController {
             return a.getName().compareToIgnoreCase(b.getName());
         });
 
-        for (java.io.File file : files) {
+        for (File file : files) {
             if (file.getName().startsWith(".")) continue;
+            if (Files.isSymbolicLink(file.toPath())) continue;
 
             Map<String, Object> node = new HashMap<>();
             node.put("name", file.getName());
@@ -224,12 +204,13 @@ public class RepoController {
         return nodes;
     }
 
-    private void collectFiles(java.io.File dir, List<java.io.File> files) {
-        java.io.File[] children = dir.listFiles();
+    private void collectFiles(File dir, List<File> files) {
+        File[] children = dir.listFiles();
         if (children == null) return;
-        for (java.io.File f : children) {
+        for (File f : children) {
             if (f.getName().startsWith(".")) continue;
             if (f.getName().equals("target") || f.getName().equals("node_modules")) continue;
+            if (Files.isSymbolicLink(f.toPath())) continue;
             if (f.isDirectory()) collectFiles(f, files);
             else if (isCodeFile(f.getName())) files.add(f);
         }
@@ -248,15 +229,5 @@ public class RepoController {
         if (name.endsWith(".ts") || name.endsWith(".tsx")) return "typescript";
         if (name.endsWith(".py")) return "python";
         return "other";
-    }
-
-    private boolean isBinaryFile(String fileName) {
-        String lower = fileName.toLowerCase();
-        return lower.endsWith(".png")  || lower.endsWith(".jpg")  ||
-               lower.endsWith(".jpeg") || lower.endsWith(".gif")  ||
-               lower.endsWith(".ico")  || lower.endsWith(".svg")  ||
-               lower.endsWith(".class")|| lower.endsWith(".jar")  ||
-               lower.endsWith(".zip")  || lower.endsWith(".pdf")  ||
-               lower.endsWith(".exe")  || lower.endsWith(".dll");
     }
 }
